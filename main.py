@@ -1,15 +1,40 @@
 """
 TODO
 """
-from . import template
+import os
 
-PATCH_SIZE = 5
+import cv2
 
-anchor_points = template.generate_anchor_points()
-one_dim_graph = template.generate_one_dimensional_graph(anchor_points)
-patch_centers = template.generate_patch_centers()
+import structprop as sp
 
-for anchor_point in anchor_points:
-    # TODO: Pick applicable patch_center
-    patch_center = (0, 0)
-    img = template.apply_patch(img, patch_center, anchor_point, PATCH_SIZE
+# Source folder
+source = "test"
+source_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_images", source)
+img_fn = os.path.join(source_folder, "{}_image.png".format(source))
+structure_mask_fn = os.path.join(source_folder, "{}_image_structure_mask.png".format(source))
+unknown_mask_fn = os.path.join(source_folder, "{}_image_unknown_mask.png".format(source))
+
+# Read in image and masks
+img = sp.read_img(img_fn, color=cv2.IMREAD_COLOR)
+structure_mask, unknown_mask, overlap_mask = sp.read_masks(structure_mask_fn, unknown_mask_fn)
+inv_overlap_mask = structure_mask != overlap_mask
+
+# Determine normalize length
+norm_length = structure_mask.sum()
+
+# Determine patch size dynamically based off of image
+patch_size = int(img.shape[0] / 20)
+sampling_interval = int(patch_size // 2)
+print("Patch size: {} pixels".format(patch_size))
+print("Sampling interval: {} pixels".format(sampling_interval))
+
+# Generate anchor points
+anchor_points = sp.generate_anchor_points(overlap_mask)
+
+# Generate patch centers
+patch_centers = sp.generate_patch_centers(inv_overlap_mask)
+
+# Propagate structure
+img, M = sp.propagate_structure(img, anchor_points, patch_centers, unknown_mask)
+
+#print(M)
