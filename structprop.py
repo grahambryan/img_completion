@@ -7,6 +7,7 @@ Assumptions:
 """
 import matplotlib.pyplot as plt
 import numpy as np
+import numba
 import cv2
 
 # Preparation
@@ -70,7 +71,29 @@ def read_masks(structure_filename, unknown_filename):
     """
     structure_mask = read_img(structure_filename).astype(np.bool)
     unknown_mask = read_img(unknown_filename).astype(np.bool)
-    return structure_mask, unknown_mask, generate_overlap_mask(structure_mask, unknown_mask)
+    return structure_mask, unknown_mask
+
+
+def split_structure_mask(structure_mask):
+    """
+    Split structure mask
+
+    Args:
+        structure_mask (np.array): dtype=np.bool
+
+    Returns:
+        list(np.array): List of structure masks, one curve for each (dtype=np.bool)
+    """
+    contours = cv2.findContours(
+        structure_mask.astype(np.uint8), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
+    )[0]
+    structure_masks = list()
+    for contour in contours:
+        contour_mask = np.zeros(structure_mask.shape, dtype=np.uint8)
+        structure_masks.append(
+            cv2.fillPoly(contour_mask, pts=[contour], color=(255, 255, 255)).astype(np.bool)
+        )
+    return structure_masks
 
 
 # Structure Propagation
@@ -132,9 +155,9 @@ def generate_patch_centers(inv_overlap_mask, sampling_interval=3):
     """
     rows, cols = np.where(inv_overlap_mask)
     patch_centers = tuple(zip(rows, cols))
-    diff = np.diff(patch_centers)
-    ind_stop_cont = np.where(np.abs(np.diff(np.reshape(diff, diff.shape[0]))) > 1)[0][0]
-    return patch_centers[:ind_stop_cont:sampling_interval]
+    # diff = np.diff(patch_centers)
+    # ind_stop_cont = np.where(np.abs(np.diff(np.reshape(diff, diff.shape[0]))) > 1)[0][0]
+    return patch_centers[::sampling_interval]
 
 
 def generate_patch_mask(img, patch_center, patch_size):
@@ -154,7 +177,8 @@ def generate_patch_mask(img, patch_center, patch_size):
     row_stop = min(img.shape[0], patch_center[0] + (patch_size // 2) + 1)
     col_start = max(0, patch_center[1] - (patch_size // 2))
     col_stop = min(img.shape[1], patch_center[1] + (patch_size // 2) + 1)
-    patch_mask[row_start: row_stop, col_start: col_stop] = True
+    patch_mask[row_start:row_stop, col_start:col_stop] = True
+    # print(row_start, row_stop, col_start, col_stop)
     return patch_mask
 
 
@@ -170,7 +194,7 @@ def generate_patch(img, patch_center, patch_size):
     Returns:
         np.array: 2-D array containing patch (mini matrix) of shape (patch_size, patch_size)
     """
-    return img[generate_patch_mask(img, patch_center, patch_size)]
+    return img[generate_patch_mask(img, patch_center, patch_size)]  # TODO: Edge case cause prob
 
 
 def apply_patch(img, patch_center, patch_dest, patch_size):
@@ -195,6 +219,20 @@ def apply_patch(img, patch_center, patch_dest, patch_size):
 # Energy Minimization
 
 
+def compute_ssd(*args):
+    """
+    Computes SSD
+
+    Args:
+        *args:
+
+    Returns:
+
+    """
+    # TODO: Use cv2.templateMatch
+    return 0.
+
+
 def generate_Es_point(source_point, target_point):
     """
     Generates Es point, which encodes the structure similarity between the source patch and the
@@ -215,9 +253,9 @@ def generate_Es_point(source_point, target_point):
         np.float64: Energy similarity at xi, Es(xi)
     """
     return (
-        np.linalg.norm(np.array(source_point) - np.array(target_point)) ** 2
-        + np.linalg.norm(np.array(target_point) - np.array(source_point)) ** 2
-    )  # TODO: Normalize later (and ur mom)
+        np.linalg.norm(np.array(source_point) - np.array(target_point))
+        + np.linalg.norm(np.array(target_point) - np.array(source_point))
+    )  # TODO: Normalize by length of curve in patch
 
 
 def generate_Ei_point(img, patch_center, patch_size, unknown_mask):
@@ -238,12 +276,12 @@ def generate_Ei_point(img, patch_center, patch_size, unknown_mask):
     Returns:
         np.float64: Ei(xi), sum of the normalized squared differences
     """
-    Ei = 0.
+    Ei = 0.0
     patch_mask = generate_patch_mask(img, patch_center, patch_size)
     patch_unknown_overlap_mask = np.bitwise_and(patch_mask, unknown_mask)
     if patch_unknown_overlap_mask.any():
-        np.linalg.norm(img[patch_unknown_overlap_mask]) ** 2
-    return Ei  # TODO: Normalize this later??
+        Ei = compute_ssd(patch_unknown_overlap_mask)
+    return Ei
 
 
 def generate_E1_point(Es_point, Ei_point, ks=1.0, ki=1.0):
@@ -276,15 +314,16 @@ def generate_E2_point(img, patch_center1, patch_center2, patch_size):
     Returns:
         float: Normalized SSD between the overlapped regions of the two patches
     """
-    import pdb; pdb.set_trace()
+    # TODO: Need node 1 and node 2 (anchor points)
+    # TODO: Need to find the overlap of the patch on node 1 and node 2
     # 1) Extract overlapped region as np.array
     patch_mask1 = generate_patch_mask(img, patch_center1, patch_size)
     patch_mask2 = generate_patch_mask(img, patch_center2, patch_size)
     patch_overlap_mask = np.bitwise_and(patch_mask1, patch_mask2)
     if patch_overlap_mask.any():
-        return np.linalg.norm(img[patch_overlap_mask]) ** 2
+        return compute_ssd(patch_overlap_mask)  # TODO
     print("Uh oh, your patches don't overlap")
-    return 0.  # TODO: Normalize
+    return 0.0  # TODO: Normalize
 
 
 # Structure Propagation
@@ -307,8 +346,23 @@ def propagate_structure(img, anchor_points, patch_centers, unknown_mask, patch_s
     for ind_node in range(2, len(graph)):
         for ind_patch in range(2, len(patch_centers)):
             Es_point = generate_Es_point(patch_centers[ind_patch], graph[ind_node]["pt"])
-            Ei_point = generate_Ei_point(img, patch_centers[ind_patch], patch_size, unknown_mask)
+            Ei_point = generate_Ei_point(
+                img, patch_centers[ind_patch], patch_size, unknown_mask
+            )
             E1_point = generate_E1_point(Es_point, Ei_point)
-            E2_point = generate_E2_point(img, patch_centers[ind_patch - 1], patch_centers[ind_patch], patch_size)
-            M[ind_node, ind_patch] = E1_point + E2_point + M[ind_node-1, ind_patch-1]
+            E2_point = generate_E2_point(
+                img, patch_centers[ind_patch - 1], patch_centers[ind_patch], patch_size
+            )
+            M[ind_node, ind_patch] = E1_point + E2_point + M[ind_node - 1, ind_patch - 1]
     return img, M
+
+
+def fake_propagate_structure(img, anchor_points, patch_centers, patch_size):
+    """Fake propagate structure"""
+    img = img.copy()
+    for anchor_point in anchor_points:
+        try:
+            img = apply_patch(img, patch_centers[np.random.randint(len(patch_centers))], anchor_point, patch_size)
+        except Exception:
+            pass
+    return img
