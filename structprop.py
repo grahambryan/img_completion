@@ -99,19 +99,21 @@ def split_structure_mask(structure_mask):
 # Structure Propagation
 
 
-def generate_anchor_points(overlap_mask):
+def generate_anchor_points(overlap_mask, sampling_interval=3):
     """
     Sparsely samples curve C in the unknown region, Omega, to generate a set of L
     anchor points.
 
     Args:
         overlap_mask (np.array): dtype=np.bool
+        sampling_interval (int): Sampling interval (in pixels), which is typically half the
+                                   patch size
 
     Returns:
        tuple(tuple): Set of anchor points, L, e.g. ((0, 1), (2, 3), ...)
     """
     rows, cols = np.where(overlap_mask)
-    return tuple(zip(rows, cols))[::2]  # TODO: Do we need anchor points on edges?
+    return tuple(zip(rows, cols))[::sampling_interval]  # TODO: Do we need anchor points on edges?
 
 
 def generate_one_dimensional_graph(anchor_points):
@@ -219,7 +221,7 @@ def apply_patch(img, patch_center, patch_dest, patch_size):
 # Energy Minimization
 
 
-def compute_ssd(*args):
+def compute_ssd(mat1, mat2):
     """
     Computes SSD
 
@@ -230,10 +232,11 @@ def compute_ssd(*args):
 
     """
     # TODO: Use cv2.templateMatch
+    # ssd = cv2.matchTemplate(mat1, mat2, method=cv2.TM_SQDIFF_NORMED)
     return 0.0
 
 
-def generate_Es_point(source_point, target_point):
+def generate_Es_point(source_point, target_point, normalize_by=1):
     """
     Generates Es point, which encodes the structure similarity between the source patch and the
       structure indicated
@@ -254,7 +257,8 @@ def generate_Es_point(source_point, target_point):
     """
     return np.linalg.norm(np.array(source_point) - np.array(target_point)) + np.linalg.norm(
         np.array(target_point) - np.array(source_point)
-    )  # TODO: Normalize by length of curve in patch
+    ) / normalize_by
+    # TODO: Normalize by length of curve in patch (isnt a good approximation patch size?)
 
 
 def generate_Ei_point(img, patch_center, patch_size, unknown_mask):
@@ -280,7 +284,8 @@ def generate_Ei_point(img, patch_center, patch_size, unknown_mask):
     patch_mask = generate_patch_mask(img, patch_center, patch_size)
     patch_unknown_overlap_mask = np.bitwise_and(patch_mask, unknown_mask)
     if patch_unknown_overlap_mask.any():
-        Ei = compute_ssd(patch_unknown_overlap_mask)
+        patch = generate_patch(img, patch_center, patch_size) #TODO: still getting a (999,3) here
+        Ei = compute_ssd(img, patch) #TODO: not sure what two things to send here
     return Ei
 
 
@@ -329,13 +334,12 @@ def generate_E2_point(
         patch1 = generate_patch(img, patch_center1, patch_size)
         patch2 = generate_patch(img, patch_center2, patch_size)
         # TODO: Feed ssd the values of the overlap of patch1 and patch2 in anchor_overlap
-        return compute_ssd(anchor_overlap_mask)  # TODO
+        return compute_ssd(patch1, patch2)  # TODO
     print("Uh oh, your patches don't overlap")
     return 0.0  # TODO: Normalize
 
 
 # Dynamic Programming
-
 
 def initialize_cost_matrix(img, M, anchor_points, patch_centers, patch_size, unknown_mask):
     """
@@ -355,15 +359,17 @@ def initialize_cost_matrix(img, M, anchor_points, patch_centers, patch_size, unk
         M (np.array): dtype=np.float64
 
     """
+
     target_point = anchor_points[0]
     for i in range(len(patch_centers)):
         source_point = patch_centers[i]
-        Es_point = generate_Es_point(source_point, target_point)
+        Es_point = generate_Es_point(source_point, target_point, normalize_by=patch_size)
         Ei_point = generate_Ei_point(img, source_point, patch_size, unknown_mask)
-        M[0][patch_centers[i]] = generate_E1_point(Es_point, Ei_point)
+
+        M[0][i] = generate_E1_point(Es_point, Ei_point)
     return M
 
-
+# @numba.jit()
 def fill_cost_matrix(img, M, anchor_points, patch_centers, patch_size, unknown_mask):
     """
     Fill the cost matrix, M, for each node (anchor) with the energy of each sample (patch)
@@ -383,14 +389,15 @@ def fill_cost_matrix(img, M, anchor_points, patch_centers, patch_size, unknown_m
         index_mat_of_min_energy (np.array): dtype=np.uint8
 
     """
-    index_mat_of_min_energy = np.mat(np.ones(M.shape) * np.inf)
+    M = initialize_cost_matrix(img, M, anchor_points, patch_centers, patch_size, unknown_mask)
+    index_mat_of_min_energy = np.ones(M.shape) * np.inf
     for i in range(1, len(anchor_points)):
         for j in range(len(patch_centers)):
             curr_energy = np.inf
             curr_index_at_min_energy = np.inf
             source_point = patch_centers[j]
             target_point = anchor_points[i]
-            Es_point = generate_Es_point(source_point, target_point)
+            Es_point = generate_Es_point(source_point, target_point, normalize_by=patch_size)
             Ei_point = generate_Ei_point(img, source_point, patch_size, unknown_mask)
             E1_point = generate_E1_point(Es_point, Ei_point)
             for k in range(len(patch_centers)):
@@ -442,7 +449,7 @@ def determine_optimal_patches(M, index_mat_of_min_energy):
         index_mat_of_min_energy (np.array): dtype=np.uint8
 
     Returns:
-        optimal_patch_centers (np.array): dtype=np.uint8
+        optimal_patch_centers (list):
 
     """
     optimal_patch_centers = list()
@@ -450,7 +457,8 @@ def determine_optimal_patches(M, index_mat_of_min_energy):
     for i in range(M.shape[0] - 1, -1, -1):
         idx = nodes_min_energy_index(M, i)
         optimal_patch_centers.append(index_mat_of_min_energy[i][idx])
-    return np.array(optimal_patch_centers.reverse()).astype(np.uint8)
+    optimal_patch_centers.reverse()
+    return optimal_patch_centers
 
 # Structure Propagation
 
@@ -471,7 +479,7 @@ def propagate_structure(img, anchor_points, patch_centers, unknown_mask, patch_s
     M = np.zeros((len(graph), len(patch_centers)), dtype=np.float64)
     for ind_node in range(2, len(graph)):
         for ind_patch in range(2, len(patch_centers)):
-            Es_point = generate_Es_point(patch_centers[ind_patch], graph[ind_node]["pt"])
+            Es_point = generate_Es_point(patch_centers[ind_patch], graph[ind_node]["pt"], normalize_by=patch_size)
             Ei_point = generate_Ei_point(
                 img, patch_centers[ind_patch], patch_size, unknown_mask
             )
