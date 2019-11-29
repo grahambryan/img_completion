@@ -332,7 +332,7 @@ class StructurePropagation:
         """
         return (ks * Es_point) + (ki * Ei_point)
 
-    def get_E2_point(self, patch_center1, patch_center2, anchor_point1, anchor_point2):
+    def get_E2_point(self, source_point1, source_point2, target_point1, target_point2):
         """
         Generates E2 point, for the energy coherence constraint
 
@@ -348,14 +348,16 @@ class StructurePropagation:
         # TODO: Need node 1 and node 2 (anchor points)
         # TODO: Need to find the overlap of the patch on node 1 and node 2
         # 1) Extract overlapped region in unknown region as np.array
-        patch_at_target_mask1 = self.target_patch_masks[anchor_point1]
-        patch_at_target_mask2 = self.target_patch_masks[anchor_point2]
-        anchor_overlap_mask = np.bitwise_and(patch_at_target_mask1, patch_at_target_mask2)
-        if anchor_overlap_mask.any():
-            patch1 = self.source_patches[patch_center1]
-            patch2 = self.source_patches[patch_center2]
+        target_mask1 = self.target_patch_masks[target_point1]
+        target_mask2 = self.target_patch_masks[target_point2]
+        target_overlap_mask = np.bitwise_and(target_mask1, target_mask2)
+        if target_overlap_mask.any():
+            patch1 = self.source_patches[source_point1]
+            patch2 = self.source_patches[source_point2]
+            target_mask1[target_mask1] = patch1
+            target_mask2[target_mask2] = patch2
             # TODO: Feed ssd the values of the overlap of patch1 and patch2 in anchor_overlap
-            return self.compute_ssd(patch1, patch2)  # TODO
+            return self.compute_ssd(target_mask1, target_mask2)  # TODO
         print("Uh oh, your patches don't overlap")
         return 0.0  # TODO: Normalize
 
