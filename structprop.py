@@ -39,6 +39,7 @@ class StructurePropagation:
         self.img = self.read_image(self.filenames["image"])
         self.comb_structure_mask, self.unknown_mask = self.read_masks()
         self.downsample(2 if self.fast else 1)
+        self.img_orig = self.img.copy()  # Store copy of original image
         self.rows, self.cols, self.channels = self.img.shape
         self.structure_masks = self.split_structure_mask()
         self.patch_size = kwargs.get("patch_size", int(self.img.shape[0] / 20))
@@ -347,18 +348,17 @@ class StructurePropagation:
             Ei_point = self.get_Ei_point(source_point)
             self.cost_matrix[0][i] = self.get_E1_point(Es_point, Ei_point)
 
-    def get_cost_matrix(self):
+    def get_cost_matrix(self, process_one=False):
         """
         Fill the cost matrix, M, for each node (anchor) with the energy of each sample (patch)
 
         (2) from white board drawing
         """
+        # TODO: Remove process_one eventually
         self.initialize_cost_matrix()
         self.min_energy_index = np.ones(self.cost_matrix.shape) * np.inf
         for i in range(1, len(self.anchor_points)):
             print("Processing anchor point {} out of {}...".format(i, len(self.anchor_points)))
-            if i == 5:
-                return
             for j in range(len(self.patch_centers)):
                 curr_energy = np.inf
                 curr_index_at_min_energy = np.inf
@@ -383,6 +383,8 @@ class StructurePropagation:
                         curr_index_at_min_energy = k
                 self.cost_matrix[i][j] = E1_point + curr_energy
                 self.min_energy_index[i][j] = curr_index_at_min_energy
+            if process_one:
+                return
 
     # @numba.jit
     def nodes_min_energy_index(self, node):
@@ -451,6 +453,17 @@ class StructurePropagation:
             self.get_cost_matrix()
             self.get_optimal_patches()
             self.apply_optimal_patches()
+
+    def debug(self):
+        """Temp debug method"""
+        # TODO: Remove this eventually
+        self.structure_mask = self.structure_masks[0]
+        self.get_overlap_mask()
+        self.inv_overlap_mask = self.structure_mask != self.overlap_mask
+        self.norm_length = self.structure_mask.sum()
+        self.get_anchor_points()
+        self.get_patch_centers()
+        self.get_cost_matrix(process_one=True)
 
 
 # ------------------------ Older/deprecated functions below this point ------------------------
