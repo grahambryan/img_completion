@@ -92,24 +92,24 @@ class StructurePropagation:
         return "{}({})".format(self.__class__.__name__, ", ".join(data))
 
     @staticmethod
-    def read_image(filename, grayscale=False, mpl=False):
+    def read_image(filename, grayscale=False):
         """Read image, optionally in grayscale"""
         # Convert to grayscale
         if grayscale:
             return cv2.imread(filename, cv2.IMREAD_GRAYSCALE)
-        # Convert to RGB for matplotlib plotting
-        if mpl:
-            return cv2.cvtColor(cv2.imread(filename, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
         return cv2.imread(filename, cv2.IMREAD_COLOR)
 
     @staticmethod
     def plot_img(img, savefig="test.png", **kwargs):
         """Simple image plotting wrapper"""
         plt.figure()
-        plt.imshow(img.astype(np.uint8), **kwargs)
+        if img.ndim > 2:
+            plt.imshow(cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_BGR2RGB), **kwargs)
+        else:
+            plt.imshow(img.astype(np.uint8), **kwargs)
         plt.axis("off")
         if savefig:
-            cv2.imwrite(savefig, cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGB2BGR))
+            cv2.imwrite(savefig, img.astype(np.uint8))
 
     def read_masks(self):
         """Reads structure mask and unknown mask"""
@@ -178,6 +178,7 @@ class StructurePropagation:
         if len(self.anchor_points) > len(self.patch_centers):
             print("Uh oh! You have more anchor points than samples")
 
+    @numba.jit
     def get_patch_mask(self, patch_center):
         """
         Generates patch mask
@@ -188,6 +189,10 @@ class StructurePropagation:
         Returns:
 
         """
+        # TODO: This function is SLOW which is causing get_cost_matrix() to run very slowly
+        #  since this gets called twice EACH time that get_E2_point() is called; need to find
+        #  a way to speed this up and/or make sure we aren't doing these calculations multiple
+        #  times
         patch_mask = np.zeros((self.rows, self.cols), dtype=np.bool)
         row_start = max(0, patch_center[0] - (self.patch_size // 2))
         row_stop = min(self.rows, patch_center[0] + (self.patch_size // 2) + 1)
@@ -323,7 +328,7 @@ class StructurePropagation:
         print("Uh oh, your patches don't overlap")
         return 0.0  # TODO: Normalize
 
-    @numba.jit
+    # @numba.jit
     def initialize_cost_matrix(self):
         """
         Initialize the first row of the cost matrix, M
@@ -342,7 +347,6 @@ class StructurePropagation:
             Ei_point = self.get_Ei_point(source_point)
             self.cost_matrix[0][i] = self.get_E1_point(Es_point, Ei_point)
 
-    @numba.jit
     def get_cost_matrix(self):
         """
         Fill the cost matrix, M, for each node (anchor) with the energy of each sample (patch)
@@ -353,6 +357,8 @@ class StructurePropagation:
         self.min_energy_index = np.ones(self.cost_matrix.shape) * np.inf
         for i in range(1, len(self.anchor_points)):
             print("Processing anchor point {} out of {}...".format(i, len(self.anchor_points)))
+            if i == 5:
+                return
             for j in range(len(self.patch_centers)):
                 curr_energy = np.inf
                 curr_index_at_min_energy = np.inf
@@ -378,7 +384,7 @@ class StructurePropagation:
                 self.cost_matrix[i][j] = E1_point + curr_energy
                 self.min_energy_index[i][j] = curr_index_at_min_energy
 
-    @numba.jit
+    # @numba.jit
     def nodes_min_energy_index(self, node):
         """
         Determine lowest energy sample index for current node
@@ -400,7 +406,7 @@ class StructurePropagation:
                 idx = i
         return idx
 
-    @numba.jit
+    # @numba.jit
     def get_optimal_patches(self):
         """
         Determine the optimal patch centers for each node (anchor)
