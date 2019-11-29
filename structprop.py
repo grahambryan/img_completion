@@ -43,15 +43,18 @@ class StructurePropagation:
         self.rows, self.cols, self.channels = self.img.shape
         self.structure_masks = self.split_structure_mask()
         self.patch_size = kwargs.get("patch_size", int(self.img.shape[0] / 20))
-        self.sampling_int = int(self.patch_size // 20)
+        self.sampling_int = int(self.patch_size // 2)
 
         # Applicable only to current structure mask
         self.structure_mask = np.zeros_like(self.comb_structure_mask)
         self.overlap_mask = np.zeros_like(self.comb_structure_mask)
         self.inv_overlap_mask = np.zeros_like(self.comb_structure_mask)
-        self.norm_length = 0
         self.anchor_points = list()
         self.patch_centers = list()
+        self.source_patch_masks = dict()
+        self.source_patches = dict()
+        self.target_patches = dict()
+        self.target_patch_masks = dict()
         self.cost_matrix = np.array([])
         self.min_energy_index = np.array([])
         self.optimal_patch_centers = list()
@@ -160,7 +163,7 @@ class StructurePropagation:
         """
         rows, cols = np.where(self.overlap_mask)
         self.anchor_points = tuple(zip(rows, cols))[
-            ::20  # TODO
+            :: self.sampling_int  # TODO
         ]  # TODO: Do we need anchor points on edges?
         print("# of anchors: {}".format(len(self.anchor_points)))
 
@@ -173,7 +176,7 @@ class StructurePropagation:
         patch_centers = tuple(zip(rows, cols))
         # diff = np.diff(patch_centers)
         # ind_stop_cont = np.where(np.abs(np.diff(np.reshape(diff, diff.shape[0]))) > 1)[0][0]
-        self.patch_centers = patch_centers[::5]  # TODO
+        self.patch_centers = patch_centers[:: self.sampling_int]  # TODO
         print("# of samples: {}".format(len(self.patch_centers)))
         # Check to see if we have more patch centers than anchor points
         if len(self.anchor_points) > len(self.patch_centers):
@@ -190,10 +193,6 @@ class StructurePropagation:
         Returns:
 
         """
-        # TODO: This function is SLOW which is causing get_cost_matrix() to run very slowly
-        #  since this gets called twice EACH time that get_E2_point() is called; need to find
-        #  a way to speed this up and/or make sure we aren't doing these calculations multiple
-        #  times
         patch_mask = np.zeros((self.rows, self.cols), dtype=np.bool)
         row_start = max(0, patch_center[0] - (self.patch_size // 2))
         row_stop = min(self.rows, patch_center[0] + (self.patch_size // 2) + 1)
@@ -203,17 +202,40 @@ class StructurePropagation:
         # print(row_start, row_stop, col_start, col_stop)
         return patch_mask
 
-    def get_patch(self, patch_center):
-        """
-        Generate patch from patch center and patch size.
+    def get_source_patch_masks(self):
+        """Determine source patch masks"""
+        self.source_patch_masks = {
+            patch_center: self.get_patch_mask(patch_center)
+            for patch_center in self.patch_centers
+        }
 
-        Args:
-            patch_center (tuple): Patch center
+    def get_target_patch_masks(self):
+        """Determine target patch masks"""
+        self.target_patch_masks = {
+            patch_center: self.get_patch_mask(patch_center)
+            for patch_center in self.anchor_points
+        }
 
-        Returns:
-            np.array: 2-D array containing patch (mini matrix) of shape (patch_size, patch_size)
-        """
-        return self.img[self.get_patch_mask(patch_center)]  # TODO: Edge case cause prob
+    def get_source_patches(self):
+        """Determine source patches"""
+        self.source_patches = {
+            patch_center: self.img[self.source_patch_masks[patch_center]]
+            for patch_center in self.patch_centers
+        }
+
+    def get_target_patches(self):
+        """Determine source patches"""
+        self.target_patches = {
+            patch_center: self.img[self.target_patch_masks[patch_center]]
+            for patch_center in self.anchor_points
+        }
+
+    def get_patches(self):
+        """Determines patch masks and match centers for both source and target patches"""
+        self.get_source_patch_masks()
+        self.get_target_patch_masks()
+        self.get_source_patches()
+        self.get_target_patches()
 
     @staticmethod
     def compute_ssd(mat1, mat2):
@@ -227,11 +249,14 @@ class StructurePropagation:
 
         """
         # TODO: Use cv2.templateMatch
-        # ssd = cv2.matchTemplate(mat1, mat2, method=cv2.TM_SQDIFF_NORMED)
-        return 0.0
+        try:
+            ssd = cv2.matchTemplate(mat1, mat2, method=cv2.TM_SQDIFF_NORMED)
+            return ssd[0][0]
+        except Exception:
+            return 0.0
+        # return np.sum((mat1 - mat2) ** 2)
 
-    @staticmethod
-    def get_Es_point(source_point, target_point, normalize_by=1):
+    def get_Es_point(self, source_point, target_point):
         """
         Generates Es point, which encodes the structure similarity between the source patch and the
           structure indicated
@@ -246,18 +271,19 @@ class StructurePropagation:
             source_point (tuple): Center of source patch, P(xi)
             target_point (tuple): Center of target point with the same patch size, centered at
                                     anchor point, pi
-            normalize_by (Union[int, float]): Quantity to normalize by
 
         Returns:
             np.float64: Energy similarity at xi, Es(xi)
         """
+        normalize_by = np.bitwise_and(
+            self.overlap_mask, self.target_patch_masks[target_point]
+        ).sum()
         return (
             np.linalg.norm(np.array(source_point) - np.array(target_point))
             + np.linalg.norm(np.array(target_point) - np.array(source_point)) / normalize_by
         )
-        # TODO: Normalize by length of curve in patch (isnt a good approximation patch size?)
 
-    def get_Ei_point(self, source_point):
+    def get_Ei_point(self, source_point, target_point):
         """
         Generates Ei point, which constrains the synthesizes patches on the boundary of unknown
           region, Omega, to match well with the known pixels in I - Omega.
@@ -275,13 +301,19 @@ class StructurePropagation:
         """
         # TODO: I think we need to pass in anchor point (see if its on the edge of the unkown region)
         Ei = 0.0
-        patch_mask = self.get_patch_mask(source_point)
-        patch_unknown_overlap_mask = np.bitwise_and(patch_mask, self.unknown_mask)
-        if patch_unknown_overlap_mask.any():
-            patch = self.get_patch(source_point)  # TODO: still getting a (999,3) here
-            Ei = self.compute_ssd(
-                self.img, patch
-            )  # TODO: not sure what two things to send here
+        source_patch_mask = self.source_patch_masks[source_point]
+        source_patch = self.source_patches[source_point]
+        source_patch_unknown_overlap_mask = np.bitwise_and(source_patch_mask, self.unknown_mask)
+        target_patch_mask = self.target_patch_masks[target_point]
+        try:
+            if source_patch_unknown_overlap_mask.any():
+                test_img = self.img.copy()
+                test_img[target_patch_mask] = source_patch
+                Ei = self.compute_ssd(
+                    self.img, test_img
+                )  # TODO: not sure what two things to send here
+        except Exception:
+            pass
         return Ei
 
     @staticmethod
@@ -316,14 +348,12 @@ class StructurePropagation:
         # TODO: Need node 1 and node 2 (anchor points)
         # TODO: Need to find the overlap of the patch on node 1 and node 2
         # 1) Extract overlapped region in unknown region as np.array
-        # patch_mask1 = generate_patch_mask(img, patch_center1, patch_size)
-        # patch_mask2 = generate_patch_mask(img, patch_center2, patch_size)
-        patch_at_target_mask1 = self.get_patch_mask(anchor_point1)
-        patch_at_target_mask2 = self.get_patch_mask(anchor_point2)
+        patch_at_target_mask1 = self.target_patch_masks[anchor_point1]
+        patch_at_target_mask2 = self.target_patch_masks[anchor_point2]
         anchor_overlap_mask = np.bitwise_and(patch_at_target_mask1, patch_at_target_mask2)
         if anchor_overlap_mask.any():
-            patch1 = self.get_patch(patch_center1)
-            patch2 = self.get_patch(patch_center2)
+            patch1 = self.source_patches[patch_center1]
+            patch2 = self.source_patches[patch_center2]
             # TODO: Feed ssd the values of the overlap of patch1 and patch2 in anchor_overlap
             return self.compute_ssd(patch1, patch2)  # TODO
         print("Uh oh, your patches don't overlap")
@@ -343,11 +373,12 @@ class StructurePropagation:
         for i in range(len(self.patch_centers)):
             source_point = self.patch_centers[i]
             Es_point = self.get_Es_point(
-                source_point, target_point, normalize_by=self.patch_size
+                source_point, target_point,
             )
-            Ei_point = self.get_Ei_point(source_point)
+            Ei_point = self.get_Ei_point(source_point, target_point)
             self.cost_matrix[0][i] = self.get_E1_point(Es_point, Ei_point)
 
+    # @numba.jit
     def get_cost_matrix(self, process_one=False):
         """
         Fill the cost matrix, M, for each node (anchor) with the energy of each sample (patch)
@@ -365,9 +396,9 @@ class StructurePropagation:
                 source_point = self.patch_centers[j]
                 target_point = self.anchor_points[i]
                 Es_point = self.get_Es_point(
-                    source_point, target_point, normalize_by=self.patch_size
+                    source_point, target_point
                 )
-                Ei_point = self.get_Ei_point(source_point)
+                Ei_point = self.get_Ei_point(source_point, target_point)
                 E1_point = self.get_E1_point(Es_point, Ei_point)
                 for k in range(len(self.patch_centers)):
                     source_point1 = self.patch_centers[k]
@@ -401,7 +432,7 @@ class StructurePropagation:
         """
         idx = -1
         curr_energy = np.inf
-        for i in range(self.cols):
+        for i in range(self.cost_matrix.shape[1]):
             new_energy = self.cost_matrix[node][i]
             if new_energy < curr_energy:
                 curr_energy = new_energy
@@ -417,7 +448,7 @@ class StructurePropagation:
         """
         self.optimal_patch_centers = list()
         # Backtrace through cost to determine optimal samples
-        for i in range(self.rows - 1, -1, -1):
+        for i in range(self.cost_matrix.shape[0] - 1, -1, -1):
             idx = self.nodes_min_energy_index(i)
             self.optimal_patch_centers.append(self.min_energy_index[i][idx])
         self.optimal_patch_centers.reverse()
@@ -447,9 +478,9 @@ class StructurePropagation:
             self.structure_mask = structure_mask
             self.get_overlap_mask()
             self.inv_overlap_mask = self.structure_mask != self.overlap_mask
-            self.norm_length = self.structure_mask.sum()
             self.get_anchor_points()
             self.get_patch_centers()
+            self.get_patches()
             self.get_cost_matrix()
             self.get_optimal_patches()
             self.apply_optimal_patches()
@@ -463,6 +494,7 @@ class StructurePropagation:
         self.norm_length = self.structure_mask.sum()
         self.get_anchor_points()
         self.get_patch_centers()
+        self.get_patches()
         self.get_cost_matrix(process_one=True)
 
 
