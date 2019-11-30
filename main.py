@@ -1,6 +1,7 @@
 """
 Main entry point script
 """
+import os
 from argparse import ArgumentParser, RawDescriptionHelpFormatter, ArgumentDefaultsHelpFormatter
 
 import structprop
@@ -40,10 +41,22 @@ def main():
     struct_prop = structprop.StructurePropagation(args.image_source, fast=args.fast)
     if args.debug:
         struct_prop.debug()
-        import pdb; pdb.set_trace()
+        import pdb
+
+        pdb.set_trace()
     struct_prop.run()
-    text_prop = textprop.TexturePropagation(struct_prop.img)
+    struct_prop.plot_img(
+        struct_prop.img_output,
+        os.path.join(
+            os.path.abspath(os.path.curdir), "{}-struct-prop-only.png".format(args.image_source)
+        ),
+    )
+    text_prop = textprop.TexturePropagation(struct_prop.img_output)
     text_prop.run()
+    text_prop.plot_img(
+        text_prop.img_output,
+        os.path.join(os.path.abspath(os.path.curdir), "{}.png".format(args.image_source)),
+    )
     return 0
 
 

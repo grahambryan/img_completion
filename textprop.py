@@ -18,7 +18,8 @@ class TexturePropagation:
     def __init__(self, img, **kwargs):
         """StructurePropagation constructor"""
         self.img = img
-        self.mask = self.img == (0, 0, 0)
+        self.mask = self.get_mask(img)
+        self.img_output = np.zeros_like(self.img)
         self.savepath = kwargs.get("savepath", os.path.abspath(os.curdir))
         self.savefigs = kwargs.get("savefigs", True)
 
@@ -70,5 +71,11 @@ class TexturePropagation:
         if savefig:
             cv2.imwrite(savefig, img.astype(np.uint8))
 
+    @staticmethod
+    def get_mask(img):
+        """Get image mask"""
+        return (cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) == 0).astype(np.uint8)
+
     def run(self):
         """Run texture propagation"""
+        self.img_output = cv2.inpaint(self.img, self.mask, 3, cv2.INPAINT_NS)

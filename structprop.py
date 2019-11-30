@@ -45,7 +45,7 @@ class StructurePropagation:
         self.rows, self.cols, self.channels = self.img.shape
         self.structure_masks = self.split_structure_mask()
         self.patch_size = kwargs.get("patch_size", int(self.img.shape[0] / 30))
-        self.sampling_int = int(self.patch_size // 2)
+        self.sampling_int = max(int(self.patch_size // 2), 1)
 
         # Applicable only to current structure mask
         self.structure_mask = np.zeros_like(self.comb_structure_mask)
@@ -178,7 +178,7 @@ class StructurePropagation:
         patch_centers = tuple(zip(rows, cols))
         # diff = np.diff(patch_centers)
         # ind_stop_cont = np.where(np.abs(np.diff(np.reshape(diff, diff.shape[0]))) > 1)[0][0]
-        self.patch_centers = patch_centers #patch_centers[:: self.sampling_int]
+        self.patch_centers = patch_centers[::2]
         print("# of samples: {}".format(len(self.patch_centers)))
 
     # @numba.jit
@@ -221,8 +221,8 @@ class StructurePropagation:
         """Determine source patches"""
         self.source_patches = {
             patch_center: self.img[self.source_patch_masks[patch_center]]
-            for patch_center in self.patch_centers if
-            patch_center in self.source_patch_masks
+            for patch_center in self.patch_centers
+            if patch_center in self.source_patch_masks
         }
         # for patch in self.source_patches:
         #     self.plot_img(self.source_patches[patch].reshape(5, 5, 3))
@@ -366,7 +366,7 @@ class StructurePropagation:
                 # TODO: Need to handle edge cases better
                 return 0.0
             return self.compute_ssd(full1[target_overlap_mask], full2[target_overlap_mask])
-        print("Uh oh, your patches don't overlap")
+        # print("Uh oh, your patches don't overlap")
         return 0.0
 
     # @numba.jit
@@ -465,12 +465,16 @@ class StructurePropagation:
             int(patch) for patch in self.optimal_patch_centers if np.isfinite(patch)
         ]
         optimal_patch_centers = list()
+        print(self.optimal_patch_centers)
         for patch_center in self.optimal_patch_centers:
-            if self.source_patches[
-                self.patch_centers[patch_center]].size != self.patch_size * self.patch_size * 3:
+            if (
+                self.source_patches[self.patch_centers[patch_center]].size
+                != self.patch_size * self.patch_size * 3
+            ):
                 node = patch_center - 1 if patch_center > 1 else patch_center + 1
                 optimal_patch_centers.append(node)
-        self.optimal_patch_centers = optimal_patch_centers
+        if optimal_patch_centers:
+            self.optimal_patch_centers = optimal_patch_centers
 
     def apply_optimal_patches(self):
         """Apply optimal patches"""
@@ -517,6 +521,7 @@ class StructurePropagation:
         self.get_optimal_patches()
         self.apply_optimal_patches()
         self.plot_img(self.img_output)
+
 
 # ------------------------ Older/deprecated functions below this point ------------------------
 
