@@ -44,7 +44,7 @@ class StructurePropagation:
         self.img_output[self.unknown_mask] = (0, 0, 0)
         self.rows, self.cols, self.channels = self.img.shape
         self.structure_masks = self.split_structure_mask()
-        self.patch_size = kwargs.get("patch_size", int(self.img.shape[0] / 20))
+        self.patch_size = kwargs.get("patch_size", int(self.img.shape[0] / 30))
         self.sampling_int = int(self.patch_size // 2)
 
         # Applicable only to current structure mask
@@ -178,13 +178,10 @@ class StructurePropagation:
         patch_centers = tuple(zip(rows, cols))
         # diff = np.diff(patch_centers)
         # ind_stop_cont = np.where(np.abs(np.diff(np.reshape(diff, diff.shape[0]))) > 1)[0][0]
-        self.patch_centers = patch_centers[:: self.sampling_int]  # TODO
+        self.patch_centers = patch_centers #patch_centers[:: self.sampling_int]
         print("# of samples: {}".format(len(self.patch_centers)))
-        # Check to see if we have more patch centers than anchor points
-        if len(self.anchor_points) > len(self.patch_centers):
-            print("Uh oh! You have more anchor points than samples")
 
-    @numba.jit
+    # @numba.jit
     def get_patch_mask(self, patch_center):
         """
         Generates patch mask
@@ -209,7 +206,9 @@ class StructurePropagation:
         self.source_patch_masks = {
             patch_center: self.get_patch_mask(patch_center)
             for patch_center in self.patch_centers
+            if not np.bitwise_and(self.get_patch_mask(patch_center), self.unknown_mask).any()
         }
+        self.patch_centers = tuple(list(self.source_patch_masks.keys()))
 
     def get_target_patch_masks(self):
         """Determine target patch masks"""
@@ -222,8 +221,11 @@ class StructurePropagation:
         """Determine source patches"""
         self.source_patches = {
             patch_center: self.img[self.source_patch_masks[patch_center]]
-            for patch_center in self.patch_centers
+            for patch_center in self.patch_centers if
+            patch_center in self.source_patch_masks
         }
+        # for patch in self.source_patches:
+        #     self.plot_img(self.source_patches[patch].reshape(5, 5, 3))
 
     def get_target_patches(self):
         """Determine source patches"""
@@ -301,25 +303,25 @@ class StructurePropagation:
         Returns:
             np.float64: Ei(xi), sum of the normalized squared differences
         """
-        # TODO: I think we need to pass in anchor point (see if its on the edge of the unkown region)
         Ei = 0.0
         source_patch_mask = self.source_patch_masks[source_point]
         source_patch = self.source_patches[source_point]
         source_patch_unknown_overlap_mask = np.bitwise_and(source_patch_mask, self.unknown_mask)
         target_patch_mask = self.target_patch_masks[target_point]
-        try:
-            if source_patch_unknown_overlap_mask.any():
-                test_img = self.img.copy()
-                test_img[target_patch_mask] = source_patch
-                Ei = self.compute_ssd(
-                    self.img, test_img
-                )  # TODO: not sure what two things to send here
-        except Exception:
-            pass
+        # try:
+        if source_patch_unknown_overlap_mask.any():
+            test_img = self.img.copy()
+            test_img[target_patch_mask] = source_patch
+            Ei = self.compute_ssd(
+                self.img, source_patch
+            )  # TODO: not sure what two things to send here
+        # except Exception:
+        #     pass
+        # print(Ei)
         return Ei
 
     @staticmethod
-    def get_E1_point(Es_point, Ei_point, ks=1.0, ki=1.0):
+    def get_E1_point(Es_point, Ei_point, ks=30.0, ki=5.0):
         """
         Generates E1 point
 
@@ -407,8 +409,8 @@ class StructurePropagation:
                 Ei_point = self.get_Ei_point(source_point, target_point)
                 E1_point = self.get_E1_point(Es_point, Ei_point)
                 for k in range(len(self.patch_centers)):
-                    source_point1 = self.patch_centers[k]
-                    source_point2 = self.patch_centers[j]
+                    source_point1 = self.patch_centers[j]
+                    source_point2 = self.patch_centers[k]
                     target_point1 = self.anchor_points[i - 1]
                     target_point2 = target_point
                     E2_point = self.get_E2_point(
@@ -456,21 +458,33 @@ class StructurePropagation:
         # Backtrace through cost to determine optimal samples
         for i in range(self.cost_matrix.shape[0] - 1, -1, -1):
             idx = self.nodes_min_energy_index(i)
-            self.optimal_patch_centers.append(self.min_energy_index[i][idx])
+            node = self.min_energy_index[i][idx]
+            self.optimal_patch_centers.append(node)
         self.optimal_patch_centers.reverse()
         self.optimal_patch_centers = [
             int(patch) for patch in self.optimal_patch_centers if np.isfinite(patch)
         ]
+        optimal_patch_centers = list()
+        for patch_center in self.optimal_patch_centers:
+            if self.source_patches[
+                self.patch_centers[patch_center]].size != self.patch_size * self.patch_size * 3:
+                node = patch_center - 1 if patch_center > 1 else patch_center + 1
+                optimal_patch_centers.append(node)
+        self.optimal_patch_centers = optimal_patch_centers
 
     def apply_optimal_patches(self):
         """Apply optimal patches"""
         for ind, patch in enumerate(self.optimal_patch_centers):
-            source_patch = self.source_patch_masks[self.patch_centers[int(patch)]]
+            source_patch = self.source_patches[self.patch_centers[int(patch)]]
             target_patch = self.target_patch_masks[self.anchor_points[ind]]
+            # self.plot_img(source_patch.reshape(5, 5, 3))
             try:
-                self.img_output[target_patch] = self.img[source_patch]
+                self.img_output[target_patch] = source_patch
             except Exception:
                 print("Couldn't apply patch")
+        # self.plot_img(image)
+        # self.plot_img(source_patch.reshape(self.patch_size, self.patch_size, 3))
+        self.plot_img(self.img)
 
     def run(self):
         """Run structure propagation"""
@@ -493,14 +507,16 @@ class StructurePropagation:
     def debug(self):
         """Temp debug method"""
         # TODO: Remove this eventually
-        self.structure_mask = self.structure_masks[0]
+        self.structure_mask = self.structure_masks[2]
         self.get_overlap_mask()
         self.inv_overlap_mask = self.structure_mask != self.overlap_mask
         self.get_anchor_points()
         self.get_patch_centers()
         self.get_patches()
-        # self.get_cost_matrix(process_one=True)
-
+        self.get_cost_matrix()
+        self.get_optimal_patches()
+        self.apply_optimal_patches()
+        self.plot_img(self.img_output)
 
 # ------------------------ Older/deprecated functions below this point ------------------------
 
