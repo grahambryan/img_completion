@@ -38,14 +38,18 @@ class StructurePropagation:
         }
         self.img = self.read_image(self.filenames["image"])
         self.comb_structure_mask, self.unknown_mask = self.read_masks()
-        self.downsample(2 if self.fast else 1)
+        self.num_curves = kwargs.get("num_curves", None)
+        self.down_sample = kwargs.get("down_sample", 2)
+        self.downsample(self.down_sample if self.fast else 1)
         self.img_orig = self.img.copy()  # Store copy of original image
         self.img_output = self.img.copy()
         self.img_output[self.unknown_mask] = (0, 0, 0)
+        self.img_output_rand = self.img.copy()
+        self.img_output_rand[self.unknown_mask] = (0, 0, 0)
         self.rows, self.cols, self.channels = self.img.shape
         self.structure_masks = self.split_structure_mask()
         self.patch_size = kwargs.get("patch_size", int(self.img.shape[0] / 30))
-        self.sampling_int = max(int(self.patch_size // 2), 1)
+        self.sampling_int = kwargs.get("sampling_int", max(int(self.patch_size // 2), 1))
 
         # Applicable only to current structure mask
         self.structure_mask = np.zeros_like(self.comb_structure_mask)
@@ -60,6 +64,7 @@ class StructurePropagation:
         self.cost_matrix = np.array([])
         self.min_energy_index = np.array([])
         self.optimal_patch_centers = list()
+        self.updated_structure_mask = self.structure_mask
 
         # Make sure savepath directory exists
         if self.savefigs:
@@ -127,7 +132,7 @@ class StructurePropagation:
         )
         return structure_mask, unknown_mask
 
-    def downsample(self, factor=2):
+    def downsample(self, factor):
         """Down sample input image/masks"""
         self.img = self.img[::factor, ::factor, :] if self.fast else self.img
         self.comb_structure_mask = self.comb_structure_mask[::factor, ::factor]
@@ -141,16 +146,23 @@ class StructurePropagation:
         Returns:
             list(np.array): List of structure masks, one curve for each (dtype=np.bool)
         """
-        contours = cv2.findContours(
-            self.comb_structure_mask.astype(np.uint8), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
-        )[0]
-        structure_masks = list()
-        for contour in contours:
-            contour_mask = np.zeros(self.comb_structure_mask.shape, dtype=np.uint8)
-            structure_masks.append(
-                cv2.fillPoly(contour_mask, pts=[contour], color=(255, 255, 255)).astype(np.bool)
-            )
-        return structure_masks
+        # If user has specified only 1 curve
+        if not self.num_curves:
+            contours = cv2.findContours(
+                self.comb_structure_mask.astype(np.uint8),
+                cv2.RETR_TREE,
+                cv2.CHAIN_APPROX_SIMPLE,
+            )[0]
+            structure_masks = list()
+            for contour in contours:
+                contour_mask = np.zeros(self.comb_structure_mask.shape, dtype=np.uint8)
+                structure_masks.append(
+                    cv2.fillPoly(contour_mask, pts=[contour], color=(255, 255, 255)).astype(
+                        np.bool
+                    )
+                )
+            return structure_masks
+        return [self.comb_structure_mask]
 
     def get_overlap_mask(self):
         """Generates the mask where the structure mask and unknown mask overlap"""
@@ -178,7 +190,7 @@ class StructurePropagation:
         patch_centers = tuple(zip(rows, cols))
         # diff = np.diff(patch_centers)
         # ind_stop_cont = np.where(np.abs(np.diff(np.reshape(diff, diff.shape[0]))) > 1)[0][0]
-        self.patch_centers = patch_centers[::2]
+        self.patch_centers = patch_centers[:: self.sampling_int // 2]
         print("# of samples: {}".format(len(self.patch_centers)))
 
     # @numba.jit
@@ -216,6 +228,8 @@ class StructurePropagation:
             patch_center: self.get_patch_mask(patch_center)
             for patch_center in self.anchor_points
         }
+        for patch in self.target_patch_masks:
+            self.updated_structure_mask[self.target_patch_masks[patch]] = True
 
     def get_source_patches(self):
         """Determine source patches"""
@@ -321,15 +335,15 @@ class StructurePropagation:
         return Ei
 
     @staticmethod
-    def get_E1_point(Es_point, Ei_point, ks=30.0, ki=5.0):
+    def get_E1_point(Es_point, Ei_point, ks=50.0, ki=2.0):
         """
         Generates E1 point
 
         Args:
             Es_point (float): Energy structure point
             Ei_point (float): Energy completion point
-            ks (float): Relative weight 1
-            ki (float): Relative weight 2
+            ks (float): Relative weight 1 (default to value in paper)
+            ki (float): Relative weight 2 (default to value in paper)
 
         Returns:
             float: E1 point
@@ -488,17 +502,32 @@ class StructurePropagation:
                 print("Couldn't apply patch")
         # self.plot_img(image)
         # self.plot_img(source_patch.reshape(self.patch_size, self.patch_size, 3))
-        self.plot_img(self.img)
+        # self.plot_img(self.img)
+
+    def apply_random_patches(self):
+        """Apply optimal patches"""
+        for ind, patch in enumerate(self.optimal_patch_centers):
+            source_patch = self.source_patches[self.patch_centers[np.random.randint(len(self.patch_centers))]]
+            target_patch = self.target_patch_masks[self.anchor_points[ind]]
+            # self.plot_img(source_patch.reshape(5, 5, 3))
+            try:
+                self.img_output_rand[target_patch] = source_patch
+            except Exception:
+                print("Couldn't apply patch")
 
     def run(self):
         """Run structure propagation"""
         print("Patch size: {} pixels".format(self.patch_size))
         print("Sampling interval: {} pixels".format(self.sampling_int))
+
+        self.plot_img(self.comb_structure_mask)
+
         for ind, structure_mask in enumerate(self.structure_masks):
             print(
                 "Processing structure: {} out of {}".format(ind + 1, len(self.structure_masks))
             )
             self.structure_mask = structure_mask
+            self.updated_structure_mask = structure_mask
             self.get_overlap_mask()
             self.inv_overlap_mask = self.structure_mask != self.overlap_mask
             self.get_anchor_points()
@@ -507,6 +536,7 @@ class StructurePropagation:
             self.get_cost_matrix()
             self.get_optimal_patches()
             self.apply_optimal_patches()
+            self.apply_random_patches()
 
     def debug(self):
         """Temp debug method"""
