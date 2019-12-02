@@ -170,6 +170,10 @@ class StructurePropagation:
             self.structure_mask.astype(np.bool), self.unknown_mask.astype(np.bool)
         )
 
+    def get_inv_overlap_mask(self):
+        """Generates the inverted overlap mask"""
+        self.inv_overlap_mask = self.structure_mask != self.overlap_mask
+
     def get_anchor_points(self):
         """
         Sparsely samples curve C in the unknown region, Omega, to generate a set of L
@@ -479,7 +483,6 @@ class StructurePropagation:
             int(patch) for patch in self.optimal_patch_centers if np.isfinite(patch)
         ]
         optimal_patch_centers = list()
-        print(self.optimal_patch_centers)
         for patch_center in self.optimal_patch_centers:
             if (
                 self.source_patches[self.patch_centers[patch_center]].size
@@ -529,7 +532,7 @@ class StructurePropagation:
             self.structure_mask = structure_mask
             self.updated_structure_mask = structure_mask
             self.get_overlap_mask()
-            self.inv_overlap_mask = self.structure_mask != self.overlap_mask
+            self.get_inv_overlap_mask()
             self.get_anchor_points()
             self.get_patch_centers()
             self.get_patches()
@@ -563,6 +566,7 @@ def generate_one_dimensional_graph(anchor_points):
       nodes on C (sample curve). Generates graph (anchor points with information about
       neighboring points)
 
+    Args:
     Args:
         anchor_points (set(tuple)): Set of anchor points
 
